@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Matrix Multiply Experiment (Server-side)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f1724;
+      color: #e6eef6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    #status { font-size: 18px; margin: 12px; }
+    pre { font-size: 13px; background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Matrix Multiplication</h1>
+  <div id="status">Computing on server...</div>
+  <pre id="output"></pre>
+
+  <script>
+    async function runExperiment() {
+      try {
+        const res = await fetch("/multiply");
+        const data = await res.json();
+        document.getElementById("status").textContent = 
+          `Done! Size: ${data.n}x${data.n} | Time: ${data.time.toFixed(2)} ms`;
+        document.getElementById("output").textContent = data.preview;
+      } catch (err) {
+        document.getElementById("status").textContent = "Error: " + err.message;
+      }
+    }
+    runExperiment();
+  </script>
+</body>
+</html>

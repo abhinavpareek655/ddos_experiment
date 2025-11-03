@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Matrix Multiply Experiment</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#7dd3fc;--muted:#94a3b8}
+    body{background:linear-gradient(180deg,#071029 0%, #071a2a 100%);color:#e6eef6;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:0;padding:24px;}
+    .container{max-width:980px;margin:0 auto}
+    h1{font-size:20px;margin:0 0 8px}
+    .card{background:rgba(255,255,255,0.02);padding:18px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6);}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    label{font-size:13px;color:var(--muted)}
+    input[type=number], select{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit;min-width:120px}
+    button{background:linear-gradient(90deg,var(--accent),#60a5fa);border:none;padding:10px 14px;border-radius:10px;color:#072234;font-weight:600;cursor:pointer}
+    button.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--accent)}
+    .status{font-size:13px;color:var(--muted);margin-top:8px}
+    .results{margin-top:12px;font-family:monospace;font-size:13px;white-space:pre-wrap}
+    .controls{display:flex;gap:8px;align-items:center}
+    .matrix-preview{max-height:220px;overflow:auto;background:rgba(255,255,255,0.01);padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.02)}
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Matrix Multiply — experiment harness (single-file)</h1>
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Matrix size (n × n)</label><br>
+          <input id="size" type="number" min="1" max="5000" value="512" />
+        </div>
+        <div>
+          <label>Value range</label><br>
+          <input id="minVal" type="number" value="0" style="width:70px" />
+          <input id="maxVal" type="number" value="1" style="width:70px;margin-left:6px" />
+        </div>
+        <div>
+          <label>Use Web Worker</label><br>
+          <select id="useWorker"><option value="true" selected>Yes (recommended)</option><option value="false">No (main thread)</option></select>
+        </div>
+        <div>
+          <label>Show result matrix</label><br>
+          <select id="showResult"><option value="false" selected>No</option><option value="true">Yes (beware large output)</option></select>
+        </div>
+      </div>
+
+      <div class="row controls">
+        <button id="gen">Generate matrices</button>
+        <button id="run" class="secondary">Run multiplication</button>
+        <button id="cancel" class="secondary" disabled>Cancel</button>
+        <button id="download" class="secondary" disabled>Download result CSV</button>
+        <div style="flex:1"></div>
+        <div style="text-align:right">
+          <div style="font-weight:600">Time: <span id="time">—</span></div>
+          <div class="status">Status: <span id="status">idle</span></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div style="flex:1">
+          <div style="font-size:13px;color:var(--muted)">Preview A (top-left 6×6)</div>
+          <div id="previewA" class="matrix-preview">—</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:13px;color:var(--muted)">Preview B (top-left 6×6)</div>
+          <div id="previewB" class="matrix-preview">—</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:13px;color:var(--muted)">Preview C (top-left 6×6)</div>
+          <div id="previewC" class="matrix-preview">—</div>
+        </div>
+      </div>
+
+      <div class="results" id="notes">
+        Tip: For realistic timing use sizes >= 256. For sizes > 1024 ensure your machine has enough RAM. The worker-based multiplication keeps the UI responsive.
+      </div>
+    </div>
+
+    <footer>Single-file demo — save as .html and open in a browser. Uses optimized i-k-j loop and Float64 arrays.</footer>
+  </div>
+
+  <script>
+    // App state
+    let A = null, B = null, C = null;
+    let worker = null;
+    let running = false;
+
+    const el = id => document.getElementById(id);
+    const sizeInput = el('size');
+    const genBtn = el('gen');
+    const runBtn = el('run');
+    const cancelBtn = el('cancel');
+    const downloadBtn = el('download');
+    const statusEl = el('status');
+    const timeEl = el('time');
+    const previewA = el('previewA');
+    const previewB = el('previewB');
+    const previewC = el('previewC');
+
+    function randBetween(min, max){return Math.random()*(max-min)+min}
+
+    function allocateMatrix(n){return new Float64Array(n*n)}
+
+    function generateMatrices(){
+      const n = Math.max(1, Math.floor(Number(sizeInput.value)||1));
+      const minV = Number(el('minVal').value)||0;
+      const maxV = Number(el('maxVal').value)||1;
+      A = allocateMatrix(n);
+      B = allocateMatrix(n);
+      C = null;
+      // fill
+      for(let i=0;i<n*n;i++){A[i]=randBetween(minV,maxV);B[i]=randBetween(minV,maxV)}
+      previewMatrix(A,n,previewA);
+      previewMatrix(B,n,previewB);
+      previewC.textContent = '—';
+      status('matrices generated (n='+n+')');
+      downloadBtn.disabled = true;
+    }
+
+    function previewMatrix(M,n,target,limit=6){
+      const rows = Math.min(limit,n), cols = Math.min(limit,n);
+      let s='';
+      for(let i=0;i<rows;i++){
+        const row = [];
+        for(let j=0;j<cols;j++) row.push(Number(M[i*n+j]).toFixed(3));
+        s += row.join('\t') + '\n';
+      }
+      target.textContent = s || '—';
+    }
+
+    // Optimized multiplication: i-k-j ordering (cache friendly)
+    function multiplyMainThread(Ain,Bin,n){
+      const C = allocateMatrix(n);
+      for(let i=0;i<n;i++){
+        for(let k=0;k<n;k++){
+          const aik = Ain[i*n + k];
+          const baseB = k*n;
+          const baseC = i*n;
+          for(let j=0;j<n;j++){
+            C[baseC + j] += aik * Bin[baseB + j];
+          }
+        }
+      }
+      return C;
+    }
+
+    function startWorkerMultiplication(){
+      if(worker) worker.terminate();
+      // create worker from blob
+      const blob = new Blob([workerCode()],{type:'application/javascript'});
+      const url = URL.createObjectURL(blob);
+      worker = new Worker(url);
+      worker.onmessage = (ev)=>{
+        const msg = ev.data;
+        if(msg.type === 'done'){
+          C = new Float64Array(msg.C);
+          finishRun(msg.time);
+          URL.revokeObjectURL(url);
+        } else if(msg.type === 'status'){
+          status(msg.text);
+        } else if(msg.type === 'cancelled'){
+          status('cancelled');
+          URL.revokeObjectURL(url);
+          running=false; cancelBtn.disabled=true;
+        }
+      };
+      // send transferable typed arrays
+      worker.postMessage({cmd:'run',A:A.buffer,B:B.buffer,n:A.length?Math.sqrt(A.length):0},[A.buffer,B.buffer]);
+      // After transfer, A and B become neutered inside main thread — set refs to null
+      A = null; B = null;
+    }
+
+    function workerCode(){
+      // returned as string to create blob
+      return `
+        self.onmessage = function(ev){
+          const msg = ev.data;
+          if(msg.cmd === 'run'){
+            const n = msg.n;
+            // reconstruct Float64Array views
+            const A = new Float64Array(msg.A);
+            const B = new Float64Array(msg.B);
+            const C = new Float64Array(n*n);
+            const t0 = performance.now();
+            for(let i=0;i<n;i++){
+              for(let k=0;k<n;k++){
+                const aik = A[i*n + k];
+                const baseB = k*n;
+                const baseC = i*n;
+                for(let j=0;j<n;j++){
+                  C[baseC + j] += aik * B[baseB + j];
+                }
+              }
+              if(i%16===0) self.postMessage({type:'status',text:'progress: row '+i+' / '+n});
+            }
+            const t1 = performance.now();
+            self.postMessage({type:'done',time:(t1-t0),C:C.buffer},[C.buffer]);
+          } else if(msg.cmd==='cancel'){
+            // no-op for now; could set a flag
+            self.postMessage({type:'cancelled'});
+          }
+        }`;
+    }
+
+    function runMultiplication(){
+      if(running) return;
+      if(!A || !B){status('generate matrices first');return}
+      const n = Math.sqrt(A.length);
+      const useWorker = el('useWorker').value === 'true';
+      running = true; runBtn.disabled = true; cancelBtn.disabled = false; genBtn.disabled = true;
+      status('running (n='+n+')');
+      timeEl.textContent = '—';
+
+      if(useWorker){
+        startWorkerMultiplication();
+      } else {
+        const t0 = performance.now();
+        // run in main thread (will block UI)
+        try{
+          C = multiplyMainThread(A,B,n);
+          const t1 = performance.now();
+          finishRun(t1-t0);
+        } catch(e){status('error: '+e.message)}
+      }
+    }
+
+    function finishRun(ms){
+      running=false; runBtn.disabled=false; cancelBtn.disabled=true; genBtn.disabled=false;
+      timeEl.textContent = ms.toFixed(2)+' ms';
+      status('done — result ready');
+      // preview top-left
+      if(C) previewMatrix(C,Math.sqrt(C.length),previewC);
+      downloadBtn.disabled = false;
+    }
+
+    function status(text){statusEl.textContent = text}
+
+    function downloadCSV(){
+      if(!C) return;
+      const n = Math.sqrt(C.length);
+      let csv = '';
+      for(let i=0;i<n;i++){
+        const row = [];
+        for(let j=0;j<n;j++) row.push(C[i*n+j].toString());
+        csv += row.join(',') + '\n';
+      }
+      const blob = new Blob([csv],{type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'matrix-result-'+n+'x'+n+'.csv'; a.click(); URL.revokeObjectURL(url);
+    }
+
+    // Cancel (best-effort): terminate worker
+    function cancelRun(){
+      if(worker){worker.terminate(); worker=null; status('terminated');}
+      running=false; runBtn.disabled=false; cancelBtn.disabled=true; genBtn.disabled=false;
+    }
+
+    // wire events
+    genBtn.addEventListener('click', generateMatrices);
+    runBtn.addEventListener('click', runMultiplication);
+    cancelBtn.addEventListener('click', cancelRun);
+    downloadBtn.addEventListener('click', downloadCSV);
+
+    // auto generate default matrices on load
+    generateMatrices();
+  </script>
+</body>
+</html>
