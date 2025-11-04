@@ -1,19 +1,16 @@
+const cluster = require("cluster");
+const os = require("os");
 const express = require("express");
 const { performance } = require("perf_hooks");
 const path = require("path");
 
-const app = express();
+const numCPUs = os.cpus().length;
 const PORT = 3000;
 
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
 function randMatrix(n, min = 0, max = 1) {
-  const M = Array.from({ length: n }, () =>
+  return Array.from({ length: n }, () =>
     Array.from({ length: n }, () => Math.random() * (max - min) + min)
   );
-  return M;
 }
 
 function multiply(A, B, n) {
@@ -29,24 +26,44 @@ function multiply(A, B, n) {
   return C;
 }
 
-app.get("/multiply", (req, res) => {
-  const n = Math.floor(Math.random() * (2048 - 512 + 1)) + 512;
-  const A = randMatrix(n);
-  const B = randMatrix(n);
-  const t0 = performance.now();
-  const C = multiply(A, B, n);
-  const t1 = performance.now();
+if (cluster.isMaster) {
+  console.log(`Master ${process.pid} is running`);
+  console.log(`Starting ${numCPUs} workers...`);
 
-  // Build a small preview of top-left 6×6
-  let preview = "";
-  const limit = Math.min(6, n);
-  for (let i = 0; i < limit; i++) {
-    preview += C[i].slice(0, limit).map(v => v.toFixed(3)).join("\t") + "\n";
+  // Fork workers
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork();
   }
 
-  res.json({ n, time: t1 - t0, preview });
-});
+  cluster.on("exit", (worker, code, signal) => {
+    console.log(`Worker ${worker.process.pid} died, restarting...`);
+    cluster.fork();
+  });
+} else {
+  const app = express();
 
-app.listen(PORT, () =>
-  console.log(`Server running at http://localhost:${PORT}`)
-);
+  app.get("/", (req, res) => {
+    res.sendFile(path.join(__dirname, "index.html"));
+  });
+
+  app.get("/multiply", (req, res) => {
+    const n = Math.floor(Math.random() * (2048 - 512 + 1)) + 512;
+    const A = randMatrix(n);
+    const B = randMatrix(n);
+    const t0 = performance.now();
+    const C = multiply(A, B, n);
+    const t1 = performance.now();
+
+    let preview = "";
+    const limit = Math.min(6, n);
+    for (let i = 0; i < limit; i++) {
+      preview += C[i].slice(0, limit).map(v => v.toFixed(3)).join("\t") + "\n";
+    }
+
+    res.json({ n, time: t1 - t0, worker: process.pid, preview });
+  });
+
+  app.listen(PORT, () => {
+    console.log(`Worker ${process.pid} started on port ${PORT}`);
+  });
+}
